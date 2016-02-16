@@ -51,29 +51,22 @@
 //!
 //! The easiest way to have a single pool shared across many threads would be
 //! to wrap `Pool` in a mutex.
+
 use std::{mem, ops, ptr, usize};
 use std::cell::UnsafeCell;
 use std::sync::Arc;
 use std::sync::atomic::{self, AtomicUsize, Ordering};
-pub use reset::{Reset, Dirty};
-
-mod reset;
 
 /// A pool of reusable values
-pub struct Pool<T: Reset> {
+pub struct Pool<T> {
     inner: Arc<UnsafeCell<PoolInner<T>>>,
 }
 
-impl<T: Reset> Pool<T> {
+impl<T> Pool<T> {
     /// Creates a new pool that can contain up to `capacity` entries as well as
     /// `extra` extra bytes. Initializes each entry with the given function.
-    pub fn with_capacity<F>(count: usize, mut extra: usize, init: F) -> Pool<T>
-            where F: Fn() -> T {
-
-        let mut inner = PoolInner::with_capacity(count, extra);
-
-        // Get the actual number of extra bytes
-        extra = inner.entry_size - mem::size_of::<Entry<T>>();
+    pub fn with_capacity<F: Fn() -> T>(count: usize, init: F) -> Pool<T> {
+        let mut inner = PoolInner::with_capacity(count);
 
         // Initialize the entries
         for i in 0..count {
@@ -81,10 +74,8 @@ impl<T: Reset> Pool<T> {
                 ptr::write(inner.entry_mut(i), Entry {
                     data: init(),
                     next: i + 1,
-                    extra: extra,
                 });
             }
-            inner.init += 1;
         }
 
         Pool { inner: Arc::new(UnsafeCell::new(inner)) }
@@ -96,24 +87,18 @@ impl<T: Reset> Pool<T> {
     /// The value returned from the pool has not been reset and contains the
     /// state that it previously had when it was last released.
     pub fn checkout(&mut self) -> Option<Checkout<T>> {
-        self.inner_mut().checkout()
-            .map(|ptr| {
-                Checkout {
-                    entry: ptr,
-                    inner: self.inner.clone(),
-                }
-            }).map(|mut checkout| {
-                checkout.reset();
-                checkout
-            })
+        self.inner_mut().checkout().map(|ptr| {
+            Checkout {
+                entry: ptr,
+                inner: self.inner.clone(),
+            }
+        })
     }
 
     fn inner_mut(&self) -> &mut PoolInner<T> {
         unsafe { mem::transmute(self.inner.get()) }
     }
 }
-
-unsafe impl<T: Send> Send for Pool<T> { }
 
 /// A handle to a checked out value. When dropped out of scope, the value will
 /// be returned to the pool.
@@ -123,16 +108,6 @@ pub struct Checkout<T> {
 }
 
 impl<T> Checkout<T> {
-    /// Read access to the raw bytes
-    pub fn extra(&self) -> &[u8] {
-        self.entry().extra()
-    }
-
-    /// Write access to the extra bytes
-    pub fn extra_mut(&mut self) -> &mut [u8] {
-        self.entry_mut().extra_mut()
-    }
-
     fn entry(&self) -> &Entry<T> {
         unsafe { mem::transmute(self.entry) }
     }
@@ -148,16 +123,11 @@ impl<T> Checkout<T> {
 
 impl<T> ops::Deref for Checkout<T> {
     type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.entry().data
-    }
+    fn deref(&self) -> &T { &self.entry().data }
 }
 
 impl<T> ops::DerefMut for Checkout<T> {
-    fn deref_mut(&mut self) -> &mut T {
-        &mut self.entry_mut().data
-    }
+    fn deref_mut(&mut self) -> &mut T { &mut self.entry_mut().data }
 }
 
 impl<T> Drop for Checkout<T> {
@@ -166,24 +136,22 @@ impl<T> Drop for Checkout<T> {
     }
 }
 
-unsafe impl<T: Send> Send for Checkout<T> { }
-unsafe impl<T: Sync> Sync for Checkout<T> { }
+unsafe impl<T: Send> Send for Checkout<T> {}
+unsafe impl<T: Sync> Sync for Checkout<T> {}
 
 struct PoolInner<T> {
     #[allow(dead_code)]
     memory: Box<[u8]>,  // Ownership of raw memory
     next: AtomicUsize,  // Offset to next available value
     ptr: *mut Entry<T>, // Pointer to first entry
-    init: usize,        // Number of initialized entries
     count: usize,       // Total number of entries
-    entry_size: usize,  // Byte size of each entry
 }
 
 // Max size of the pool
 const MAX: usize = usize::MAX >> 1;
 
 impl<T> PoolInner<T> {
-    fn with_capacity(count: usize, mut extra: usize) -> PoolInner<T> {
+    fn with_capacity(count: usize) -> PoolInner<T> {
         // The required alignment for the entry. The start of the entry must
         // align with this number
         let align = mem::align_of::<Entry<T>>();
@@ -194,15 +162,8 @@ impl<T> PoolInner<T> {
 
         let mask = align - 1;
 
-        // If the requested extra memory does not match with the align,
-        // increase it so that it does.
-        if extra & mask != 0 {
-            extra = (extra + align) & !mask;
-        }
-
-        // Calculate the size of each entry. Since the extra bytes are
-        // immediately after the entry, just add the sizes
-        let entry_size = mem::size_of::<Entry<T>>() + extra;
+        // Calculate the size of each entry.
+        let entry_size = mem::size_of::<Entry<T>>();
 
         // This should always be true, but let's check it anyway
         assert!(entry_size & mask == 0, "entry size is not aligned");
@@ -219,17 +180,13 @@ impl<T> PoolInner<T> {
         let (memory, ptr) = alloc(size, align);
 
         // Zero out the memory for safety
-        unsafe {
-            ptr::write_bytes(ptr, 0, size);
-        }
+        unsafe { ptr::write_bytes(ptr, 0, size); }
 
         PoolInner {
             memory: memory,
             next: AtomicUsize::new(0),
             ptr: ptr as *mut Entry<T>,
-            init: 0,
             count: count,
-            entry_size: entry_size,
         }
     }
 
@@ -263,14 +220,10 @@ impl<T> PoolInner<T> {
     }
 
     fn checkin(&self, ptr: *mut Entry<T>) {
-        let mut idx;
-        let mut entry: &mut Entry<T>;
-
-        unsafe {
-            // Figure out the index
-            idx = ((ptr as usize) - (self.ptr as usize)) / self.entry_size;
-            entry = mem::transmute(ptr);
-        }
+        // Figure out the index
+        let idx = ((ptr as usize) - (self.ptr as usize)) /
+            mem::size_of::<Entry<T>>();
+        let mut entry: &mut Entry<T> = unsafe { mem::transmute(ptr) };
 
         debug_assert!(idx < self.count, "invalid index; idx={}", idx);
 
@@ -306,10 +259,8 @@ impl<T> PoolInner<T> {
 
 impl<T> Drop for PoolInner<T> {
     fn drop(&mut self) {
-        for i in 0..self.init {
-            unsafe {
-                let _ = ptr::read(self.entry(i));
-            }
+        for i in 0..self.count {
+            unsafe { let _ = ptr::read(self.entry(i)); }
         }
     }
 }
@@ -317,26 +268,9 @@ impl<T> Drop for PoolInner<T> {
 struct Entry<T> {
     data: T,       // Keep first
     next: usize,   // Index of next available entry
-    extra: usize,  // Number of extra bytes available
 }
 
-impl<T> Entry<T> {
-    fn extra(&self) -> &[u8] {
-        use std::slice;
-
-        unsafe {
-            let ptr: *const u8 = mem::transmute(self);
-            let ptr = ptr.offset(mem::size_of::<Entry<T>>() as isize);
-
-            slice::from_raw_parts(ptr, self.extra)
-        }
-    }
-
-    #[allow(mutable_transmutes)]
-    fn extra_mut(&mut self) -> &mut [u8] {
-        unsafe { mem::transmute(self.extra()) }
-    }
-}
+impl<T> Entry<T> { }
 
 /// Allocate memory
 fn alloc(mut size: usize, align: usize) -> (Box<[u8]>, *mut u8) {
