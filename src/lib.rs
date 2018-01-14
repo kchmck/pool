@@ -8,10 +8,10 @@
 //! Example:
 //!
 //! ```
-//! use pool::{Pool, Dirty};
+//! use pool::Pool;
 //! use std::thread;
 //!
-//! let mut pool = Pool::with_capacity(20, 0, || Dirty(Vec::with_capacity(16_384)));
+//! let mut pool = Pool::with_capacity(20, || Vec::with_capacity(16_384));
 //!
 //! let mut vec = pool.checkout().unwrap();
 //!
