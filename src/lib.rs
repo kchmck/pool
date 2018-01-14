@@ -223,7 +223,7 @@ impl<T> PoolInner<T> {
         // Figure out the index
         let idx = ((ptr as usize) - (self.ptr as usize)) /
             mem::size_of::<Entry<T>>();
-        let mut entry: &mut Entry<T> = unsafe { mem::transmute(ptr) };
+        let entry: &mut Entry<T> = unsafe { mem::transmute(ptr) };
 
         debug_assert!(idx < self.count, "invalid index; idx={}", idx);
 
