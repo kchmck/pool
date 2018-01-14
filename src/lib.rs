@@ -35,13 +35,6 @@
 //!
 //! ```
 //!
-//! ## Extra byte storage
-//!
-//! Each value in the pool can be padded with an arbitrary number of bytes that
-//! can be accessed as a slice. This is useful if implementing something like a
-//! pool of buffers. The metadata could be stored as the `Pool` value and the
-//! byte array can be stored in the padding.
-//!
 //! ## Threading
 //!
 //! Checking out values from the pool requires a mutable reference to the pool
